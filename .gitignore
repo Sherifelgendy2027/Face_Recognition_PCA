@@ -1,0 +1,32 @@
+# ---------------------------------------------------
+# CMake and Build Artifacts (Specific to your Mac)
+# ---------------------------------------------------
+build/
+.qt/
+CMakeCache.txt
+CMakeFiles/
+Makefile
+cmake_install.cmake
+*.cmake
+
+# ---------------------------------------------------
+# Dataset and Images (DO NOT UPLOAD)
+# ---------------------------------------------------
+dataset/
+*.jpg
+*.jpeg
+*.png
+*.pgm
+
+# ---------------------------------------------------
+# IDE and Editor settings (Optional, but good practice)
+# ---------------------------------------------------
+.vscode/
+.idea/
+*.user
+*.pro.user
+
+# ---------------------------------------------------
+# macOS System Files
+# ---------------------------------------------------
+.DS_Store
