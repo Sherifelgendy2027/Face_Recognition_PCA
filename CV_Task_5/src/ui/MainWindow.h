@@ -9,6 +9,7 @@
 #include "../pipeline/FaceDetector.h"
 #include "../pipeline/FaceRecognizer.h"
 #include "../pipeline/PCAPipeline.h"
+#include "DetectionWorker.h"
 #include "ROCWidget.h"
 
 #include <QImage>
@@ -21,17 +22,20 @@
 #include <vector>
 
 class QLabel;
+class QProgressBar;
 class QPushButton;
 class QTextEdit;
 class QDoubleSpinBox;
 class QSpinBox;
 class QResizeEvent;
+class QThread;
 
 namespace facerecog {
 
 class MainWindow : public QMainWindow {
 public:
     explicit MainWindow(QWidget* parent = nullptr);
+    ~MainWindow() override;
 
 protected:
     void resizeEvent(QResizeEvent* event) override;
@@ -43,19 +47,26 @@ private:
     void trainModel();
     void loadTestImage();
     void runDetectionAndRecognition();
+    void generatePerformanceReport();
 
     void updateImageView();
     void annotateDetections(const std::vector<FaceDetection>& detections,
                             const std::vector<RecognitionResult>& recognitions);
     void appendLog(const QString& message);
+    void setDetectionUiRunning(bool running);
 
     QString defaultDatasetPath() const;
     std::pair<std::vector<QPointF>, double> buildRocCurve() const;
+    std::pair<int, int> leaveOneOutRecognitionScore(int knnK) const;
+    QString buildPerformanceReportText() const;
 
 private:
     PCAPipeline m_pca;
     std::unique_ptr<FaceDetector> m_detector;
     std::unique_ptr<FaceRecognizer> m_recognizer;
+
+    QThread* m_detectionThread = nullptr;
+    bool m_detectionRunning = false;
 
     QString m_datasetPath;
     QString m_testImagePath;
@@ -73,6 +84,8 @@ private:
     QPushButton* m_trainButton = nullptr;
     QPushButton* m_loadImageButton = nullptr;
     QPushButton* m_runButton = nullptr;
+    QPushButton* m_reportButton = nullptr;
+    QProgressBar* m_detectionProgressBar = nullptr;
     QTextEdit* m_log = nullptr;
     QDoubleSpinBox* m_varianceSpin = nullptr;
     QDoubleSpinBox* m_thresholdSpin = nullptr;

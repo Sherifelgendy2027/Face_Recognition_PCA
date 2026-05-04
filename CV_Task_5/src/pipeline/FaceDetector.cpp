@@ -7,6 +7,7 @@
 #include <numeric>
 #include <stdexcept>
 
+#include <QCoreApplication>
 #include <QSize>
 
 namespace facerecog {
@@ -55,7 +56,8 @@ double FaceDetector::calibratedThreshold() const
 }
 
 std::vector<FaceDetection> FaceDetector::detect(const QImage& image,
-                                                const SlidingWindowConfig& config) const
+                                                 const SlidingWindowConfig& config,
+                                                 const ProgressCallback& progressCallback) const
 {
     if (!m_pca.isTrained()) {
         throw std::runtime_error("FaceDetector::detect - PCA model is not trained.");
@@ -81,34 +83,76 @@ std::vector<FaceDetection> FaceDetector::detect(const QImage& image,
         cfg.maxScale = cfg.minScale;
     }
 
+    auto reportProgress = [&](int value) {
+        if (progressCallback) {
+            progressCallback(std::clamp(value, 0, 100));
+        }
+    };
+
+    reportProgress(0);
+
     const double threshold = (cfg.rmseThreshold > 0.0)
         ? cfg.rmseThreshold
         : calibratedThreshold();
 
-    const PreparedDetectionImage prepared = prepareDetectionImage(image);
+    const PreparedDetectionImage prepared = prepareDetectionImage(image, cfg);
     const QImage& gray = prepared.image;
     const int trainW = m_pca.getTrainWidth();
     const int trainH = m_pca.getTrainHeight();
     const double dimensionScale = std::sqrt(static_cast<double>(m_pca.getImageDimension()));
 
+    const std::vector<ScaleWorkItem> scaleWorkItems = buildScaleWorkItems(gray, cfg);
+
+    std::size_t totalWindowCount = 0;
+    for (const ScaleWorkItem& item : scaleWorkItems) {
+        totalWindowCount += item.windowCount;
+    }
+
     std::vector<FaceDetection> detections;
 
-    for (double scale = cfg.minScale;
-         scale <= cfg.maxScale + 1e-9;
-         scale *= cfg.scaleFactor) {
+    std::cout
+        << "[FaceDetector] Sliding-window scan on working image "
+        << gray.width() << "x" << gray.height()
+        << " | PCA window=" << trainW << "x" << trainH
+        << " | stride=" << cfg.stride
+        << " | maxScale=" << cfg.maxScale
+        << " | scheduled windows=" << totalWindowCount
+        << " | threshold=" << threshold
+        << '\n';
 
-        const int windowW = std::max(trainW,
-                                     static_cast<int>(std::round(trainW * scale)));
-        const int windowH = std::max(trainH,
-                                     static_cast<int>(std::round(trainH * scale)));
+    if (totalWindowCount == 0) {
+        reportProgress(100);
+        return {};
+    }
 
-        if (windowW > gray.width() || windowH > gray.height()) {
-            continue;
+    std::size_t processedWindowCount = 0;
+    int lastReportedPercent = -1;
+
+    auto updateProgressFromWork = [&]() {
+        const int percent = static_cast<int>(
+            std::floor((static_cast<double>(processedWindowCount) * 100.0)
+                       / static_cast<double>(totalWindowCount))
+        );
+
+        if (percent != lastReportedPercent) {
+            lastReportedPercent = percent;
+            reportProgress(percent);
         }
+    };
 
-        for (int y = 0; y <= gray.height() - windowH; y += cfg.stride) {
-            for (int x = 0; x <= gray.width() - windowW; x += cfg.stride) {
-                const QRect workingBox(x, y, windowW, windowH);
+    for (const ScaleWorkItem& work : scaleWorkItems) {
+        int rowsSinceProcessEvents = 0;
+
+        for (int row = 0, y = 0; row < work.rows; ++row, y += cfg.stride) {
+            if (cfg.processEventsEveryRows > 0
+                && rowsSinceProcessEvents >= cfg.processEventsEveryRows) {
+                QCoreApplication::processEvents();
+                rowsSinceProcessEvents = 0;
+            }
+            ++rowsSinceProcessEvents;
+
+            for (int col = 0, x = 0; col < work.cols; ++col, x += cfg.stride) {
+                const QRect workingBox(x, y, work.windowW, work.windowH);
                 const QImage crop = gray.copy(workingBox);
                 const Vector vector = m_pca.imageToVector(crop);
                 const double rmse = m_pca.reconstructionError(vector) / dimensionScale;
@@ -123,16 +167,23 @@ std::vector<FaceDetection> FaceDetector::detect(const QImage& image,
                         detections.push_back(detection);
                     }
                 }
+
+                ++processedWindowCount;
+                updateProgressFromWork();
             }
         }
     }
+
+    reportProgress(100);
 
     return nonMaximumSuppression(std::move(detections),
                                  cfg.nmsIoUThreshold,
                                  cfg.maxDetections);
 }
 
-FaceDetector::PreparedDetectionImage FaceDetector::prepareDetectionImage(const QImage& image) const
+FaceDetector::PreparedDetectionImage FaceDetector::prepareDetectionImage(
+    const QImage& image,
+    const SlidingWindowConfig& config) const
 {
     PreparedDetectionImage prepared;
     prepared.originalSize = image.size();
@@ -140,6 +191,22 @@ FaceDetector::PreparedDetectionImage FaceDetector::prepareDetectionImage(const Q
 
     const int trainW = m_pca.getTrainWidth();
     const int trainH = m_pca.getTrainHeight();
+
+    if (config.maxInputWidth > 0 && prepared.image.width() > config.maxInputWidth) {
+        const QSize before = prepared.image.size();
+        prepared.image = prepared.image.scaledToWidth(
+            config.maxInputWidth,
+            Qt::SmoothTransformation
+        );
+        prepared.resized = true;
+
+        std::cout
+            << "[FaceDetector] Auto-downscaled detector input from "
+            << before.width() << "x" << before.height()
+            << " to " << prepared.image.width() << "x" << prepared.image.height()
+            << " using QImage::scaledToWidth(" << config.maxInputWidth
+            << ", Qt::SmoothTransformation).\n";
+    }
 
     if (prepared.image.width() < trainW || prepared.image.height() < trainH) {
         int newWidth = trainW;
@@ -200,6 +267,46 @@ FaceDetector::PreparedDetectionImage FaceDetector::prepareDetectionImage(const Q
                       static_cast<double>(std::max(1, prepared.originalSize.height()));
 
     return prepared;
+}
+
+std::vector<FaceDetector::ScaleWorkItem> FaceDetector::buildScaleWorkItems(
+    const QImage& gray,
+    const SlidingWindowConfig& config) const
+{
+    std::vector<ScaleWorkItem> items;
+
+    const int trainW = m_pca.getTrainWidth();
+    const int trainH = m_pca.getTrainHeight();
+
+    for (double scale = config.minScale;
+         scale <= config.maxScale + 1e-9;
+         scale *= config.scaleFactor) {
+
+        ScaleWorkItem item;
+        item.scale = scale;
+        item.windowW = std::max(trainW,
+                                static_cast<int>(std::round(trainW * scale)));
+        item.windowH = std::max(trainH,
+                                static_cast<int>(std::round(trainH * scale)));
+
+        if (item.windowW > gray.width() || item.windowH > gray.height()) {
+            continue;
+        }
+
+        item.cols = ((gray.width() - item.windowW) / config.stride) + 1;
+        item.rows = ((gray.height() - item.windowH) / config.stride) + 1;
+
+        if (item.rows <= 0 || item.cols <= 0) {
+            continue;
+        }
+
+        item.windowCount = static_cast<std::size_t>(item.rows)
+                         * static_cast<std::size_t>(item.cols);
+
+        items.push_back(item);
+    }
+
+    return items;
 }
 
 QRect FaceDetector::mapBoxToOriginalImage(const QRect& workingBox,

@@ -24,6 +24,7 @@ set(SOURCES
     src/pipeline/FaceDetector.cpp
     src/pipeline/FaceRecognizer.cpp
     src/ui/MainWindow.cpp
+    src/ui/DetectionWorker.cpp
     src/ui/ROCWidget.cpp
 )
 
@@ -33,6 +34,7 @@ set(HEADERS
     src/pipeline/FaceDetector.h
     src/pipeline/FaceRecognizer.h
     src/ui/MainWindow.h
+    src/ui/DetectionWorker.h
     src/ui/ROCWidget.h
 )
 

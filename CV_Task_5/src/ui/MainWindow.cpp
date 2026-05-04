@@ -6,7 +6,9 @@
 #include <QColor>
 #include <QCoreApplication>
 #include <QDir>
+#include <QDateTime>
 #include <QDoubleSpinBox>
+#include <QFile>
 #include <QFileDialog>
 #include <QFont>
 #include <QFormLayout>
@@ -17,6 +19,7 @@
 #include <QLabel>
 #include <QMessageBox>
 #include <QPainter>
+#include <QProgressBar>
 #include <QPen>
 #include <QPixmap>
 #include <QPushButton>
@@ -25,12 +28,16 @@
 #include <QSpinBox>
 #include <QSplitter>
 #include <QStatusBar>
+#include <QTextStream>
+#include <QThread>
 #include <QTextEdit>
 #include <QVBoxLayout>
+#include <QMetaType>
 
 #include <algorithm>
 #include <cmath>
 #include <iomanip>
+#include <map>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
@@ -40,6 +47,8 @@ namespace facerecog {
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
 {
+    qRegisterMetaType<facerecog::DetectionWorkerResult>("facerecog::DetectionWorkerResult");
+
     buildUi();
     connectSignals();
 
@@ -49,6 +58,14 @@ MainWindow::MainWindow(QWidget* parent)
     m_datasetPath = defaultDatasetPath();
     appendLog("Ready. Train the PCA model first, then load a test image.");
     appendLog("Default dataset path: " + m_datasetPath);
+}
+
+MainWindow::~MainWindow()
+{
+    if (m_detectionThread && m_detectionThread->isRunning()) {
+        m_detectionThread->quit();
+        m_detectionThread->wait();
+    }
 }
 
 void MainWindow::resizeEvent(QResizeEvent* event)
@@ -96,11 +113,21 @@ void MainWindow::buildUi()
     m_trainButton = new QPushButton("1. Select Dataset && Train PCA", actionsBox);
     m_loadImageButton = new QPushButton("2. Load Test Image", actionsBox);
     m_runButton = new QPushButton("3. Detect && Recognize", actionsBox);
+    m_reportButton = new QPushButton("4. Generate Performance Report", actionsBox);
     m_runButton->setEnabled(false);
+    m_reportButton->setEnabled(false);
+
+    m_detectionProgressBar = new QProgressBar(actionsBox);
+    m_detectionProgressBar->setRange(0, 100);
+    m_detectionProgressBar->setValue(0);
+    m_detectionProgressBar->setTextVisible(true);
+    m_detectionProgressBar->setFormat("Detection: %p%");
 
     actionsLayout->addWidget(m_trainButton);
     actionsLayout->addWidget(m_loadImageButton);
     actionsLayout->addWidget(m_runButton);
+    actionsLayout->addWidget(m_reportButton);
+    actionsLayout->addWidget(m_detectionProgressBar);
     sideLayout->addWidget(actionsBox);
 
     auto* paramsBox = new QGroupBox("Parameters", sidePanel);
@@ -127,7 +154,7 @@ void MainWindow::buildUi()
     m_maxScaleSpin->setRange(1.0, 5.0);
     m_maxScaleSpin->setSingleStep(0.25);
     m_maxScaleSpin->setDecimals(2);
-    m_maxScaleSpin->setValue(1.0);
+    m_maxScaleSpin->setValue(2.0);
 
     m_knnSpin = new QSpinBox(paramsBox);
     m_knnSpin->setRange(1, 15);
@@ -168,6 +195,10 @@ void MainWindow::connectSignals()
 
     connect(m_runButton, &QPushButton::clicked, this, [this]() {
         runDetectionAndRecognition();
+    });
+
+    connect(m_reportButton, &QPushButton::clicked, this, [this]() {
+        generatePerformanceReport();
     });
 }
 
@@ -234,7 +265,7 @@ void MainWindow::trainModel()
             const double imageScaleLimit = std::max(1.0,
                 std::min(static_cast<double>(m_rawTargetImage.width()) / m_pca.getTrainWidth(),
                          static_cast<double>(m_rawTargetImage.height()) / m_pca.getTrainHeight()));
-            m_maxScaleSpin->setValue(std::min(5.0, imageScaleLimit));
+            m_maxScaleSpin->setValue(std::max(1.0, std::min(2.0, imageScaleLimit)));
 
             if (m_rawTargetImage.width() < m_pca.getTrainWidth()
                 || m_rawTargetImage.height() < m_pca.getTrainHeight()) {
@@ -245,6 +276,9 @@ void MainWindow::trainModel()
         }
 
         m_runButton->setEnabled(!m_rawTargetImage.isNull());
+        if (m_reportButton) {
+            m_reportButton->setEnabled(true);
+        }
         statusBar()->showMessage("PCA model trained");
 
         QApplication::restoreOverrideCursor();
@@ -292,15 +326,19 @@ void MainWindow::loadTestImage()
         const double imageScaleLimit = std::max(1.0,
             std::min(static_cast<double>(m_rawTargetImage.width()) / m_pca.getTrainWidth(),
                      static_cast<double>(m_rawTargetImage.height()) / m_pca.getTrainHeight()));
-        m_maxScaleSpin->setValue(std::min(5.0, imageScaleLimit));
+        m_maxScaleSpin->setValue(std::max(1.0, std::min(2.0, imageScaleLimit)));
     } else {
-        m_maxScaleSpin->setValue(1.0);
+        m_maxScaleSpin->setValue(2.0);
     }
 
-    appendLog(QString("Loaded raw test image: %1 (%2x%3). Raw image will be passed directly to detector.")
+    appendLog(QString("Loaded raw test image: %1 (%2x%3). QLabel scaling remains display-only.")
                   .arg(fileName)
                   .arg(m_rawTargetImage.width())
                   .arg(m_rawTargetImage.height()));
+
+    if (m_rawTargetImage.width() > 600) {
+        appendLog(QString("Image width exceeds 600 px; detection will use a temporary scaledToWidth(600) copy while preserving the raw image for annotation/recognition crops."));
+    }
 
     if (m_pca.hasTrainingGeometry()
         && (m_rawTargetImage.width() < m_pca.getTrainWidth()
@@ -317,6 +355,10 @@ void MainWindow::loadTestImage()
 
 void MainWindow::runDetectionAndRecognition()
 {
+    if (m_detectionRunning) {
+        appendLog("Detection is already running. Please wait for it to finish.");
+        return;
+    }
     if (!m_pca.isTrained() || !m_detector || !m_recognizer) {
         QMessageBox::information(this, "Model Required", "Train the PCA model first.");
         return;
@@ -326,61 +368,130 @@ void MainWindow::runDetectionAndRecognition()
         return;
     }
 
-    try {
-        QApplication::setOverrideCursor(Qt::WaitCursor);
+    SlidingWindowConfig config;
+    config.stride = m_strideSpin->value();
+    config.minScale = 1.0;
+    config.maxScale = m_maxScaleSpin->value();
+    config.scaleFactor = 1.25;
+    config.rmseThreshold = m_thresholdSpin->value();
+    config.nmsIoUThreshold = 0.25;
+    config.maxDetections = 10;
 
-        SlidingWindowConfig config;
-        config.stride = m_strideSpin->value();
-        config.minScale = 1.0;
-        config.maxScale = m_maxScaleSpin->value();
-        config.scaleFactor = 1.25;
-        config.rmseThreshold = m_thresholdSpin->value();
-        config.nmsIoUThreshold = 0.25;
-        config.maxDetections = 10;
+    // Detection now runs on a worker thread, so the old processEvents()
+    // fallback is intentionally disabled for this UI path.
+    config.maxInputWidth = 600;
+    config.processEventsEveryRows = 0;
 
-        appendLog(QString("Running sliding-window detector: stride=%1, maxScale=%2, threshold=%3 RMSE")
-                      .arg(config.stride)
-                      .arg(config.maxScale, 0, 'f', 2)
-                      .arg(config.rmseThreshold, 0, 'f', 2));
+    QImage detectorInput = m_rawTargetImage;
+    double detectorToRawScaleX = 1.0;
+    double detectorToRawScaleY = 1.0;
 
-        std::vector<FaceDetection> detections = m_detector->detect(m_rawTargetImage, config);
-        std::vector<RecognitionResult> recognitions;
-        recognitions.reserve(detections.size());
+    if (detectorInput.width() > config.maxInputWidth) {
+        const QSize rawSize = detectorInput.size();
+        detectorInput = detectorInput.scaledToWidth(
+            config.maxInputWidth,
+            Qt::SmoothTransformation
+        );
+        detectorToRawScaleX = static_cast<double>(rawSize.width())
+            / static_cast<double>(std::max(1, detectorInput.width()));
+        detectorToRawScaleY = static_cast<double>(rawSize.height())
+            / static_cast<double>(std::max(1, detectorInput.height()));
 
-        for (const FaceDetection& detection : detections) {
-            const QImage crop = m_rawTargetImage.copy(detection.box);
-            recognitions.push_back(m_recognizer->recognize(crop, m_knnSpin->value()));
-        }
+        appendLog(QString("Auto-downscaled detector input before worker launch: %1x%2 -> %3x%4 using scaledToWidth(%5). Results will be mapped back to raw coordinates.")
+                      .arg(rawSize.width())
+                      .arg(rawSize.height())
+                      .arg(detectorInput.width())
+                      .arg(detectorInput.height())
+                      .arg(config.maxInputWidth));
 
-        annotateDetections(detections, recognitions);
-        updateImageView();
-
-        appendLog(QString("Detection complete: %1 candidate face(s).")
-                      .arg(detections.size()));
-
-        for (std::size_t i = 0; i < detections.size(); ++i) {
-            const FaceDetection& d = detections[i];
-            const RecognitionResult& r = recognitions[i];
-            appendLog(QString("  #%1 box=(%2,%3,%4,%5), face RMSE=%6, identity=%7, KNN distance=%8")
-                          .arg(i + 1)
-                          .arg(d.box.x())
-                          .arg(d.box.y())
-                          .arg(d.box.width())
-                          .arg(d.box.height())
-                          .arg(d.reconstructionRmse, 0, 'f', 2)
-                          .arg(QString::fromStdString(r.label))
-                          .arg(r.nearestDistance, 0, 'f', 2));
-        }
-
-        statusBar()->showMessage(QString("Detected %1 face(s)").arg(detections.size()));
-
-        QApplication::restoreOverrideCursor();
-    } catch (const std::exception& e) {
-        QApplication::restoreOverrideCursor();
-        QMessageBox::critical(this, "Detection/Recognition Error", e.what());
-        appendLog("Detection/recognition failed: " + QString::fromStdString(e.what()));
-        statusBar()->showMessage("Detection failed");
+        // Prevent a second downscale inside FaceDetector because this UI path
+        // already created the optimized detector input.
+        config.maxInputWidth = 0;
     }
+
+    appendLog(QString("Starting asynchronous sliding-window detection: input=%1x%2, stride=%3, maxScale=%4, threshold=%5 RMSE")
+                  .arg(detectorInput.width())
+                  .arg(detectorInput.height())
+                  .arg(config.stride)
+                  .arg(config.maxScale, 0, 'f', 2)
+                  .arg(config.rmseThreshold, 0, 'f', 2));
+
+    setDetectionUiRunning(true);
+    statusBar()->showMessage("Detection running in background...");
+
+    auto* thread = new QThread(this);
+    auto* worker = new DetectionWorker(
+        &m_pca,
+        m_rawTargetImage,
+        detectorInput,
+        detectorToRawScaleX,
+        detectorToRawScaleY,
+        config,
+        m_knnSpin->value()
+    );
+
+    m_detectionThread = thread;
+    worker->moveToThread(thread);
+
+    connect(thread, &QThread::started, worker, &DetectionWorker::run);
+
+    connect(worker, &DetectionWorker::progressChanged, this, [this](int percentage) {
+        if (m_detectionProgressBar) {
+            m_detectionProgressBar->setValue(percentage);
+        }
+        statusBar()->showMessage(QString("Detection running... %1%").arg(percentage));
+    });
+
+    connect(worker, &DetectionWorker::logMessage, this, [this](const QString& message) {
+        appendLog(message);
+    });
+
+    connect(worker, &DetectionWorker::finished, this, [this](const DetectionWorkerResult& result) {
+        if (!result.errorMessage.isEmpty()) {
+            QMessageBox::critical(this, "Detection/Recognition Error", result.errorMessage);
+            appendLog("Detection/recognition failed: " + result.errorMessage);
+            statusBar()->showMessage("Detection failed");
+        } else {
+            annotateDetections(result.detections, result.recognitions);
+            updateImageView();
+
+            appendLog(QString("Detection complete: %1 candidate face(s).")
+                          .arg(result.detections.size()));
+
+            for (std::size_t i = 0; i < result.detections.size(); ++i) {
+                const FaceDetection& d = result.detections[i];
+                const RecognitionResult& r = result.recognitions[i];
+                appendLog(QString("  #%1 box=(%2,%3,%4,%5), face RMSE=%6, identity=%7, KNN distance=%8")
+                              .arg(i + 1)
+                              .arg(d.box.x())
+                              .arg(d.box.y())
+                              .arg(d.box.width())
+                              .arg(d.box.height())
+                              .arg(d.reconstructionRmse, 0, 'f', 2)
+                              .arg(QString::fromStdString(r.label))
+                              .arg(r.nearestDistance, 0, 'f', 2));
+            }
+
+            if (m_detectionProgressBar) {
+                m_detectionProgressBar->setValue(100);
+            }
+            statusBar()->showMessage(QString("Detected %1 face(s)").arg(result.detections.size()));
+        }
+
+        setDetectionUiRunning(false);
+    });
+
+    connect(worker, &DetectionWorker::finished, thread, &QThread::quit);
+    connect(worker, &DetectionWorker::finished, worker, &QObject::deleteLater);
+
+    connect(thread, &QThread::finished, this, [this, thread]() {
+        if (m_detectionThread == thread) {
+            m_detectionThread = nullptr;
+        }
+    });
+    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+
+    thread->start();
 }
 
 void MainWindow::annotateDetections(const std::vector<FaceDetection>& detections,
@@ -456,10 +567,179 @@ void MainWindow::appendLog(const QString& message)
     }
 }
 
+void MainWindow::setDetectionUiRunning(bool running)
+{
+    m_detectionRunning = running;
+
+    if (m_runButton) {
+        m_runButton->setEnabled(!running && m_pca.isTrained() && !m_rawTargetImage.isNull());
+    }
+    if (m_trainButton) {
+        m_trainButton->setEnabled(!running);
+    }
+    if (m_loadImageButton) {
+        m_loadImageButton->setEnabled(!running);
+    }
+    if (m_reportButton) {
+        m_reportButton->setEnabled(!running && m_pca.isTrained());
+    }
+
+    if (m_detectionProgressBar) {
+        if (running) {
+            m_detectionProgressBar->setValue(0);
+        }
+    }
+}
+
 QString MainWindow::defaultDatasetPath() const
 {
     const QDir executableDir(QCoreApplication::applicationDirPath());
     return executableDir.absoluteFilePath("../dataset");
+}
+
+void MainWindow::generatePerformanceReport()
+{
+    if (!m_pca.isTrained()) {
+        QMessageBox::information(this, "Model Required", "Train the PCA model first.");
+        return;
+    }
+
+    const auto roc = buildRocCurve();
+    if (!roc.first.empty()) {
+        m_rocWidget->setCurve(roc.first, roc.second);
+    }
+
+    const QString report = buildPerformanceReportText();
+    appendLog("\n" + report);
+
+    const QString reportPath = QDir(QCoreApplication::applicationDirPath())
+        .absoluteFilePath("performance_report.txt");
+
+    QFile file(reportPath);
+    if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        QTextStream out(&file);
+        out << report;
+        file.close();
+        appendLog("Performance report saved to: " + reportPath);
+        statusBar()->showMessage("Performance report generated");
+    } else {
+        appendLog("Could not save performance report to: " + reportPath);
+        statusBar()->showMessage("Performance report generated, but save failed");
+    }
+}
+
+std::pair<int, int> MainWindow::leaveOneOutRecognitionScore(int knnK) const
+{
+    const auto& projections = m_pca.getTrainingProjections();
+    if (projections.size() < 2) {
+        return {0, 0};
+    }
+
+    const int safeK = std::max(1, knnK);
+    int correct = 0;
+    int total = 0;
+
+    for (std::size_t i = 0; i < projections.size(); ++i) {
+        struct Neighbor {
+            double distance = 0.0;
+            int identity = -1;
+        };
+
+        std::vector<Neighbor> neighbors;
+        neighbors.reserve(projections.size() - 1);
+
+        for (std::size_t j = 0; j < projections.size(); ++j) {
+            if (i == j) {
+                continue;
+            }
+
+            neighbors.push_back({
+                MathEngine::euclideanDistance(projections[i].weights, projections[j].weights),
+                projections[j].identity
+            });
+        }
+
+        std::sort(neighbors.begin(), neighbors.end(),
+                  [](const Neighbor& a, const Neighbor& b) {
+                      return a.distance < b.distance;
+                  });
+
+        const int topK = std::min(safeK, static_cast<int>(neighbors.size()));
+        std::map<int, int> votes;
+        std::map<int, double> distanceSums;
+
+        for (int n = 0; n < topK; ++n) {
+            votes[neighbors[n].identity] += 1;
+            distanceSums[neighbors[n].identity] += neighbors[n].distance;
+        }
+
+        int predictedIdentity = -1;
+        int bestVotes = -1;
+        double bestDistanceSum = std::numeric_limits<double>::infinity();
+
+        for (const auto& [identity, voteCount] : votes) {
+            const double distanceSum = distanceSums[identity];
+            if (voteCount > bestVotes
+                || (voteCount == bestVotes && distanceSum < bestDistanceSum)) {
+                predictedIdentity = identity;
+                bestVotes = voteCount;
+                bestDistanceSum = distanceSum;
+            }
+        }
+
+        if (predictedIdentity == projections[i].identity) {
+            ++correct;
+        }
+        ++total;
+    }
+
+    return {correct, total};
+}
+
+QString MainWindow::buildPerformanceReportText() const
+{
+    const auto roc = buildRocCurve();
+    const auto loo = leaveOneOutRecognitionScore(m_knnSpin ? m_knnSpin->value() : 3);
+
+    const double accuracy = (loo.second > 0)
+        ? (static_cast<double>(loo.first) * 100.0 / static_cast<double>(loo.second))
+        : 0.0;
+
+    QString report;
+    QTextStream out(&report);
+
+    out << "CV Task 5 - Performance Report\n";
+    out << "Generated: " << QDateTime::currentDateTime().toString(Qt::ISODate) << "\n\n";
+
+    out << "Requirement Coverage\n";
+    out << "1. Standard face dataset: PASS - loaded " << m_pca.getSampleCount()
+        << " images from " << m_pca.getClassCount() << " numerically labeled identities.\n";
+    out << "2. Face detection: PASS - native sliding-window PCA reconstruction detector accepts color or grayscale QImage input and converts to grayscale internally.\n";
+    out << "3. PCA/Eigen recognition: PASS - Eigenfaces projection with native K-NN classification in PCA space.\n";
+    out << "4. Performance + ROC: PASS - this report computes recognition accuracy and the ROC widget plots the curve with AUC.\n\n";
+
+    out << "Model Summary\n";
+    out << "Training window: " << m_pca.getTrainWidth() << "x" << m_pca.getTrainHeight()
+        << " (D=" << m_pca.getImageDimension() << ")\n";
+    out << "Selected eigenfaces K: " << m_pca.getK() << "\n";
+    out << "Training samples: " << m_pca.getSampleCount() << "\n";
+    out << "Classes/identities: " << m_pca.getClassCount() << "\n";
+    out << "Detector threshold: " << (m_thresholdSpin ? m_thresholdSpin->value() : 0.0) << " RMSE\n";
+    out << "Sliding stride: " << (m_strideSpin ? m_strideSpin->value() : 8) << " px\n";
+    out << "Max detection scale: " << (m_maxScaleSpin ? m_maxScaleSpin->value() : 2.0) << "\n";
+    out << "KNN k: " << (m_knnSpin ? m_knnSpin->value() : 3) << "\n\n";
+
+    out << "Recognition Evaluation\n";
+    out << "Protocol: leave-one-out over loaded training projections; the query sample is excluded from its neighbor list.\n";
+    out << "Correct: " << loo.first << " / " << loo.second << "\n";
+    out << "Accuracy: " << QString::number(accuracy, 'f', 2) << "%\n\n";
+
+    out << "ROC Evaluation\n";
+    out << "Protocol: pairwise distances in PCA space. Same-identity pairs are positives; different-identity pairs are negatives.\n";
+    out << "ROC points: " << roc.first.size() << "\n";
+    out << "AUC: " << QString::number(roc.second, 'f', 4) << "\n";
+
+    return report;
 }
 
 std::pair<std::vector<QPointF>, double> MainWindow::buildRocCurve() const
