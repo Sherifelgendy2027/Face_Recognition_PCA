@@ -7,7 +7,7 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QDateTime>
-#include <QDoubleSpinBox>
+#include <QSlider>
 #include <QFile>
 #include <QFileDialog>
 #include <QFont>
@@ -25,7 +25,7 @@
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScrollArea>
-#include <QSpinBox>
+
 #include <QSplitter>
 #include <QStatusBar>
 #include <QTextStream>
@@ -133,38 +133,61 @@ void MainWindow::buildUi()
     auto* paramsBox = new QGroupBox("Parameters", sidePanel);
     auto* form = new QFormLayout(paramsBox);
 
-    m_varianceSpin = new QDoubleSpinBox(paramsBox);
-    m_varianceSpin->setRange(0.50, 1.00);
-    m_varianceSpin->setSingleStep(0.01);
-    m_varianceSpin->setDecimals(2);
-    m_varianceSpin->setValue(0.95);
+    // ── PCA Variance slider: 50..99 → 0.50..0.99 ──
+    m_varianceSlider = new QSlider(Qt::Horizontal, paramsBox);
+    m_varianceSlider->setRange(50, 99);
+    m_varianceSlider->setValue(90);
+    m_varianceLabel = new QLabel("0.90", paramsBox);
+    m_varianceLabel->setMinimumWidth(40);
+    auto* varianceRow = new QHBoxLayout();
+    varianceRow->addWidget(m_varianceSlider, 1);
+    varianceRow->addWidget(m_varianceLabel);
+    form->addRow("PCA variance", varianceRow);
 
-    m_thresholdSpin = new QDoubleSpinBox(paramsBox);
-    m_thresholdSpin->setRange(0.0, 255.0);
-    m_thresholdSpin->setSingleStep(1.0);
-    m_thresholdSpin->setDecimals(2);
-    m_thresholdSpin->setValue(0.0);
-    m_thresholdSpin->setToolTip("0 means auto-calibrate from training reconstruction errors.");
+    // ── Face RMSE Threshold slider: 1..50 ──
+    m_thresholdSlider = new QSlider(Qt::Horizontal, paramsBox);
+    m_thresholdSlider->setRange(1, 50);
+    m_thresholdSlider->setValue(12);
+    m_thresholdLabel = new QLabel("12", paramsBox);
+    m_thresholdLabel->setMinimumWidth(40);
+    auto* thresholdRow = new QHBoxLayout();
+    thresholdRow->addWidget(m_thresholdSlider, 1);
+    thresholdRow->addWidget(m_thresholdLabel);
+    form->addRow("Face RMSE threshold", thresholdRow);
 
-    m_strideSpin = new QSpinBox(paramsBox);
-    m_strideSpin->setRange(1, 64);
-    m_strideSpin->setValue(8);
+    // ── Sliding Stride slider: 4..64 ──
+    m_strideSlider = new QSlider(Qt::Horizontal, paramsBox);
+    m_strideSlider->setRange(4, 64);
+    m_strideSlider->setValue(16);
+    m_strideLabel = new QLabel("16", paramsBox);
+    m_strideLabel->setMinimumWidth(40);
+    auto* strideRow = new QHBoxLayout();
+    strideRow->addWidget(m_strideSlider, 1);
+    strideRow->addWidget(m_strideLabel);
+    form->addRow("Sliding stride", strideRow);
 
-    m_maxScaleSpin = new QDoubleSpinBox(paramsBox);
-    m_maxScaleSpin->setRange(1.0, 5.0);
-    m_maxScaleSpin->setSingleStep(0.25);
-    m_maxScaleSpin->setDecimals(2);
-    m_maxScaleSpin->setValue(2.0);
+    // ── Max Scale slider: 10..50 → 1.0x..5.0x ──
+    m_maxScaleSlider = new QSlider(Qt::Horizontal, paramsBox);
+    m_maxScaleSlider->setRange(10, 50);
+    m_maxScaleSlider->setValue(20);
+    m_maxScaleLabel = new QLabel("2.0x", paramsBox);
+    m_maxScaleLabel->setMinimumWidth(40);
+    auto* scaleRow = new QHBoxLayout();
+    scaleRow->addWidget(m_maxScaleSlider, 1);
+    scaleRow->addWidget(m_maxScaleLabel);
+    form->addRow("Max scale", scaleRow);
 
-    m_knnSpin = new QSpinBox(paramsBox);
-    m_knnSpin->setRange(1, 15);
-    m_knnSpin->setValue(3);
+    // ── KNN k slider: 1..15 ──
+    m_knnSlider = new QSlider(Qt::Horizontal, paramsBox);
+    m_knnSlider->setRange(1, 15);
+    m_knnSlider->setValue(3);
+    m_knnLabel = new QLabel("3", paramsBox);
+    m_knnLabel->setMinimumWidth(40);
+    auto* knnRow = new QHBoxLayout();
+    knnRow->addWidget(m_knnSlider, 1);
+    knnRow->addWidget(m_knnLabel);
+    form->addRow("KNN k", knnRow);
 
-    form->addRow("PCA variance", m_varianceSpin);
-    form->addRow("Face RMSE threshold", m_thresholdSpin);
-    form->addRow("Sliding stride", m_strideSpin);
-    form->addRow("Max scale", m_maxScaleSpin);
-    form->addRow("KNN k", m_knnSpin);
     sideLayout->addWidget(paramsBox);
 
     m_rocWidget = new ROCWidget(sidePanel);
@@ -200,6 +223,23 @@ void MainWindow::connectSignals()
     connect(m_reportButton, &QPushButton::clicked, this, [this]() {
         generatePerformanceReport();
     });
+
+    // ── Slider → label dynamic updates ────────────────────────────────────
+    connect(m_varianceSlider, &QSlider::valueChanged, this, [this](int v) {
+        m_varianceLabel->setText(QString::number(v / 100.0, 'f', 2));
+    });
+    connect(m_thresholdSlider, &QSlider::valueChanged, this, [this](int v) {
+        m_thresholdLabel->setText(QString::number(v));
+    });
+    connect(m_strideSlider, &QSlider::valueChanged, this, [this](int v) {
+        m_strideLabel->setText(QString::number(v));
+    });
+    connect(m_maxScaleSlider, &QSlider::valueChanged, this, [this](int v) {
+        m_maxScaleLabel->setText(QString::number(v / 10.0, 'f', 1) + "x");
+    });
+    connect(m_knnSlider, &QSlider::valueChanged, this, [this](int v) {
+        m_knnLabel->setText(QString::number(v));
+    });
 }
 
 void MainWindow::trainModel()
@@ -229,15 +269,19 @@ void MainWindow::trainModel()
                       .arg(m_pca.getImageDimension()));
 
         appendLog(QString("Training PCA with target variance %1...")
-                      .arg(m_varianceSpin->value(), 0, 'f', 2));
+                      .arg(varianceValue(), 0, 'f', 2));
 
-        const PCATrainingResult result = m_pca.train(m_varianceSpin->value());
+        const PCATrainingResult result = m_pca.train(varianceValue());
 
         m_detector = std::make_unique<FaceDetector>(m_pca);
         m_recognizer = std::make_unique<FaceRecognizer>(m_pca);
 
         const double autoThreshold = m_detector->calibratedThreshold();
-        m_thresholdSpin->setValue(autoThreshold);
+        {
+            const int clampedThreshold = std::clamp(static_cast<int>(std::round(autoThreshold)), 1, 50);
+            m_thresholdSlider->setValue(clampedThreshold);
+            m_thresholdLabel->setText(QString::number(clampedThreshold));
+        }
 
         const auto roc = buildRocCurve();
         m_rocWidget->setCurve(roc.first, roc.second);
@@ -265,7 +309,11 @@ void MainWindow::trainModel()
             const double imageScaleLimit = std::max(1.0,
                 std::min(static_cast<double>(m_rawTargetImage.width()) / m_pca.getTrainWidth(),
                          static_cast<double>(m_rawTargetImage.height()) / m_pca.getTrainHeight()));
-            m_maxScaleSpin->setValue(std::max(1.0, std::min(2.0, imageScaleLimit)));
+            {
+                const int clampedScale = std::clamp(static_cast<int>(std::round(std::max(1.0, std::min(2.0, imageScaleLimit)) * 10.0)), 10, 50);
+                m_maxScaleSlider->setValue(clampedScale);
+                m_maxScaleLabel->setText(QString::number(clampedScale / 10.0, 'f', 1) + "x");
+            }
 
             if (m_rawTargetImage.width() < m_pca.getTrainWidth()
                 || m_rawTargetImage.height() < m_pca.getTrainHeight()) {
@@ -326,9 +374,12 @@ void MainWindow::loadTestImage()
         const double imageScaleLimit = std::max(1.0,
             std::min(static_cast<double>(m_rawTargetImage.width()) / m_pca.getTrainWidth(),
                      static_cast<double>(m_rawTargetImage.height()) / m_pca.getTrainHeight()));
-        m_maxScaleSpin->setValue(std::max(1.0, std::min(2.0, imageScaleLimit)));
+        const int clampedScale = std::clamp(static_cast<int>(std::round(std::max(1.0, std::min(2.0, imageScaleLimit)) * 10.0)), 10, 50);
+        m_maxScaleSlider->setValue(clampedScale);
+        m_maxScaleLabel->setText(QString::number(clampedScale / 10.0, 'f', 1) + "x");
     } else {
-        m_maxScaleSpin->setValue(2.0);
+        m_maxScaleSlider->setValue(20);
+        m_maxScaleLabel->setText("2.0x");
     }
 
     appendLog(QString("Loaded raw test image: %1 (%2x%3). QLabel scaling remains display-only.")
@@ -369,11 +420,11 @@ void MainWindow::runDetectionAndRecognition()
     }
 
     SlidingWindowConfig config;
-    config.stride = m_strideSpin->value();
+    config.stride = strideValue();
     config.minScale = 1.0;
-    config.maxScale = m_maxScaleSpin->value();
+    config.maxScale = maxScaleValue();
     config.scaleFactor = 1.25;
-    config.rmseThreshold = m_thresholdSpin->value();
+    config.rmseThreshold = thresholdValue();
     config.nmsIoUThreshold = 0.25;
     config.maxDetections = 10;
 
@@ -427,7 +478,7 @@ void MainWindow::runDetectionAndRecognition()
         detectorToRawScaleX,
         detectorToRawScaleY,
         config,
-        m_knnSpin->value()
+        knnValue()
     );
 
     m_detectionThread = thread;
@@ -699,7 +750,7 @@ std::pair<int, int> MainWindow::leaveOneOutRecognitionScore(int knnK) const
 QString MainWindow::buildPerformanceReportText() const
 {
     const auto roc = buildRocCurve();
-    const auto loo = leaveOneOutRecognitionScore(m_knnSpin ? m_knnSpin->value() : 3);
+    const auto loo = leaveOneOutRecognitionScore(knnValue());
 
     const double accuracy = (loo.second > 0)
         ? (static_cast<double>(loo.first) * 100.0 / static_cast<double>(loo.second))
@@ -724,10 +775,10 @@ QString MainWindow::buildPerformanceReportText() const
     out << "Selected eigenfaces K: " << m_pca.getK() << "\n";
     out << "Training samples: " << m_pca.getSampleCount() << "\n";
     out << "Classes/identities: " << m_pca.getClassCount() << "\n";
-    out << "Detector threshold: " << (m_thresholdSpin ? m_thresholdSpin->value() : 0.0) << " RMSE\n";
-    out << "Sliding stride: " << (m_strideSpin ? m_strideSpin->value() : 8) << " px\n";
-    out << "Max detection scale: " << (m_maxScaleSpin ? m_maxScaleSpin->value() : 2.0) << "\n";
-    out << "KNN k: " << (m_knnSpin ? m_knnSpin->value() : 3) << "\n\n";
+    out << "Detector threshold: " << thresholdValue() << " RMSE\n";
+    out << "Sliding stride: " << strideValue() << " px\n";
+    out << "Max detection scale: " << maxScaleValue() << "\n";
+    out << "KNN k: " << knnValue() << "\n\n";
 
     out << "Recognition Evaluation\n";
     out << "Protocol: leave-one-out over loaded training projections; the query sample is excluded from its neighbor list.\n";
@@ -827,6 +878,33 @@ std::pair<std::vector<QPointF>, double> MainWindow::buildRocCurve() const
     }
 
     return {points, std::clamp(auc, 0.0, 1.0)};
+}
+
+// ── Slider value accessors (integer → real scaling) ──────────────────────────
+
+double MainWindow::varianceValue() const
+{
+    return m_varianceSlider ? m_varianceSlider->value() / 100.0 : 0.90;
+}
+
+double MainWindow::thresholdValue() const
+{
+    return m_thresholdSlider ? static_cast<double>(m_thresholdSlider->value()) : 12.0;
+}
+
+int MainWindow::strideValue() const
+{
+    return m_strideSlider ? m_strideSlider->value() : 16;
+}
+
+double MainWindow::maxScaleValue() const
+{
+    return m_maxScaleSlider ? m_maxScaleSlider->value() / 10.0 : 2.0;
+}
+
+int MainWindow::knnValue() const
+{
+    return m_knnSlider ? m_knnSlider->value() : 3;
 }
 
 } // namespace facerecog
