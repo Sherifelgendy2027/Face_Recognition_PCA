@@ -25,8 +25,7 @@ class QLabel;
 class QProgressBar;
 class QPushButton;
 class QTextEdit;
-class QDoubleSpinBox;
-class QSpinBox;
+class QSlider;
 class QResizeEvent;
 class QThread;
 
@@ -60,6 +59,13 @@ private:
     std::pair<int, int> leaveOneOutRecognitionScore(int knnK) const;
     QString buildPerformanceReportText() const;
 
+    // ── Slider value accessors (apply integer-to-real scaling) ──
+    double varianceValue() const;     ///< Slider 50..99 → 0.50..0.99
+    double thresholdValue() const;    ///< Slider 1..50  → 1.0..50.0
+    int    strideValue() const;       ///< Slider 4..64  → 4..64
+    double maxScaleValue() const;     ///< Slider 10..50 → 1.0..5.0
+    int    knnValue() const;          ///< Slider 1..15  → 1..15
+
 private:
     PCAPipeline m_pca;
     std::unique_ptr<FaceDetector> m_detector;
@@ -87,11 +93,19 @@ private:
     QPushButton* m_reportButton = nullptr;
     QProgressBar* m_detectionProgressBar = nullptr;
     QTextEdit* m_log = nullptr;
-    QDoubleSpinBox* m_varianceSpin = nullptr;
-    QDoubleSpinBox* m_thresholdSpin = nullptr;
-    QSpinBox* m_strideSpin = nullptr;
-    QDoubleSpinBox* m_maxScaleSpin = nullptr;
-    QSpinBox* m_knnSpin = nullptr;
+
+    // Parameter sliders + companion value labels
+    QSlider* m_varianceSlider   = nullptr;
+    QLabel*  m_varianceLabel    = nullptr;
+    QSlider* m_thresholdSlider  = nullptr;
+    QLabel*  m_thresholdLabel   = nullptr;
+    QSlider* m_strideSlider     = nullptr;
+    QLabel*  m_strideLabel      = nullptr;
+    QSlider* m_maxScaleSlider   = nullptr;
+    QLabel*  m_maxScaleLabel    = nullptr;
+    QSlider* m_knnSlider        = nullptr;
+    QLabel*  m_knnLabel         = nullptr;
+
     ROCWidget* m_rocWidget = nullptr;
 };
 
